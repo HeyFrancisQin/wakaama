@@ -396,6 +396,34 @@ uint8_t dm_handleRequest(lwm2m_context_t * contextP,
             }
         }
         break;
+    
+    case COAP_FETCH:
+        if (IS_OPTION(message, COAP_OPTION_OBSERVE))
+        {
+            if (message->observe == 0)
+            {
+                result = composite_observe(contextP, uriP, serverP, message, response);
+            }
+            else if (message->observe == 1)
+            {
+                result = composite_cancel_observe(contextP, uriP, serverP, message, response);
+            }
+            else
+            {
+                result = COAP_400_BAD_REQUEST;
+            }
+        }
+        else
+        {
+            result = composite_read(contextP, uriP, serverP, message, response);
+        }
+        break;
+    case COAP_PATCH:
+    case COAP_IPATCH:
+        {
+            result = composite_write(contextP, uriP, serverP, message, response);
+        }
+        break;
 
     default:
         result = COAP_400_BAD_REQUEST;

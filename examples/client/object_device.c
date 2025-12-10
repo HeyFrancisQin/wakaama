@@ -571,7 +571,7 @@ static uint8_t prv_device_write(lwm2m_context_t *contextP,
 
         case RES_O_TIMEZONE:
             //ToDo IANA TZ Format
-            result = COAP_501_NOT_IMPLEMENTED;
+            result = COAP_204_CHANGED;
             break;
             
         default:

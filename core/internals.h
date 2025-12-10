@@ -539,4 +539,34 @@ lwm2m_server_t * utils_findBootstrapServer(lwm2m_context_t * contextP, void * fr
 lwm2m_client_t * utils_findClient(lwm2m_context_t * contextP, void * fromSessionH);
 #endif
 
+uint8_t composite_read(lwm2m_context_t *contextP,
+                       lwm2m_uri_t *uriP,
+                       lwm2m_server_t *serverP,
+                       coap_packet_t *message,
+                       coap_packet_t *response);
+
+uint8_t composite_write(lwm2m_context_t *contextP,
+                        lwm2m_uri_t *uriP,
+                        lwm2m_server_t *serverP,
+                        coap_packet_t *message,
+                        coap_packet_t *response);
+
+uint8_t composite_observe(lwm2m_context_t *contextP,
+                          lwm2m_uri_t *uriP,
+                          lwm2m_server_t *serverP,
+                          coap_packet_t *message,
+                          coap_packet_t *response);
+
+uint8_t composite_cancel_observe(lwm2m_context_t *contextP,
+                                 lwm2m_uri_t *uriP,
+                                 lwm2m_server_t *serverP,
+                                 coap_packet_t *message,
+                                 coap_packet_t *response);
+
+// 聚合通知函数（主动通知已观察的资源组）
+void composite_notify(lwm2m_context_t *contextP, time_t currentTime);
+
+#define W_RED     "\033[37;41m"      // 红色文本
+#define END       "\033[0m"
+
 #endif

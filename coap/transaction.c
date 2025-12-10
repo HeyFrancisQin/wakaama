@@ -126,7 +126,7 @@ static int prv_checkFinished(lwm2m_transaction_t * transacP,
         return false;
     }
 
-    if (COAP_DELETE < transactionMessage->code)
+    if (COAP_IPATCH < transactionMessage->code)
     {
         // response
         return transacP->ack_received ? 1 : 0;
