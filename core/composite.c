@@ -1239,8 +1239,29 @@ uint8_t composite_write(lwm2m_context_t *contextP,
         lwm2m_data_free(dataSize, dataP);
     }
     
-    COMPOSITE_TRACE("=== COMPOSITE WRITE DONE === result=%d", result);
-    return result;
+    // RFC 8810: Composite Write 响应码的规则
+    // - 如果所有资源都成功写入 -> 2.04 Changed
+    // - 如果部分资源成功 -> 2.04 Changed（部分成功的写入）
+    // - 如果没有资源成功 -> 返回第一个错误码（通常是 4.04 Not Found）
+    
+    liblwm2m_log("Composite write results: %d successful, %d failed", successCount, failureCount);
+    
+    if (successCount > 0)
+    {
+        // 至少有一个资源成功写入
+        return COAP_204_CHANGED;
+    }
+    else if (failureCount > 0)
+    {
+        // 所有资源都失败，返回记录的第一个错误码
+        return result;
+    }
+    else
+    {
+        // 没有处理任何资源
+        liblwm2m_log("No resources were processed");
+        return COAP_400_BAD_REQUEST;
+    }
 }
 
 // ======================== Composite Observe ========================
