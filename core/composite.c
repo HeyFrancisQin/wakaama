@@ -870,100 +870,43 @@ static int prv_encode_multi_resource(lwm2m_uri_t *uris, int uriCount,
     *payload_out = NULL;
     *payload_len_out = 0;
     
-    // 为每个URI读取资源数据
+    // 使用框架的 object_readCompositeData() 一次性读取所有URI的数据
+    // 这个函数会返回一个正确结构化的数据数组
     lwm2m_data_t *dataArray = NULL;
-    int totalDataCount = 0;
+    int dataSize = 0;
     
-    // 首先分配足够大的数据数组（最坏情况：每个URI对应一个资源）
-    dataArray = (lwm2m_data_t *)lwm2m_malloc(sizeof(lwm2m_data_t) * uriCount);
-    if (dataArray == NULL)
-    {
-        COMPOSITE_ERROR("Failed to allocate data array for %d URIs", uriCount);
-        return COAP_500_INTERNAL_SERVER_ERROR;
-    }
-    memset(dataArray, 0, sizeof(lwm2m_data_t) * uriCount);
+    COMPOSITE_TRACE("Reading composite data for %d URIs", uriCount);
+    uint8_t readResult = object_readCompositeData(contextP, uris, uriCount, &dataSize, &dataArray);
     
-    // 逐个读取每个URI的资源数据
-    for (int i = 0; i < uriCount; i++)
+    if (readResult != COAP_205_CONTENT || dataArray == NULL || dataSize <= 0)
     {
-        COMPOSITE_TRACE("Reading resource data for URI %d: object=%u instance=%u resource=%u", i,
-                       uris[i].objectId, uris[i].instanceId, uris[i].resourceId);
-        
-        lwm2m_data_t *readData = NULL;
-        int readSize = 0;
-        
-        // 调用框架函数读取资源数据
-        uint8_t readResult = object_readData(contextP, &uris[i], &readSize, &readData);
-        
-        if (readResult == COAP_205_CONTENT && readData != NULL && readSize > 0)
+        COMPOSITE_ERROR("Failed to read composite data: result=%d, dataSize=%d", readResult, dataSize);
+        if (dataArray != NULL)
         {
-            COMPOSITE_TRACE("  Read %d data items, first item id=%u type=%d", readSize, readData[0].id, readData[0].type);
-            
-            // 将读取的数据合并到总数据数组中
-            if (totalDataCount + readSize <= uriCount)
-            {
-                memcpy(&dataArray[totalDataCount], readData, sizeof(lwm2m_data_t) * readSize);
-                totalDataCount += readSize;
-                COMPOSITE_TRACE("  Merged %d items into output array, total now=%d", readSize, totalDataCount);
-            }
-            else
-            {
-                COMPOSITE_ERROR("Data array overflow at URI index %d", i);
-            }
-            
-            // 释放框架分配的内存
-            lwm2m_data_free(readSize, readData);
+            lwm2m_data_free(dataSize, dataArray);
         }
-        else
-        {
-            COMPOSITE_ERROR("Failed to read data for URI %d: result=%d", i, readResult);
-            // 继续处理其他URI，不中断
-        }
-    }
-    
-    if (totalDataCount == 0)
-    {
-        COMPOSITE_ERROR("No data was read from any URI");
-        lwm2m_free(dataArray);
         return COAP_404_NOT_FOUND;
     }
     
-    COMPOSITE_TRACE("Total data items collected: %d", totalDataCount);
+    COMPOSITE_TRACE("Successfully read %d data items", dataSize);
     
-    // 为SenML编码创建基础URI
-    // 对于复合操作，我们使用根URI（没有设置资源ID）作为基础
-    // senml_cbor_serialize() 会为每个数据项自动生成相对URI
-    lwm2m_uri_t baseUri;
-    memset(&baseUri, 0, sizeof(baseUri));
-    // 保持baseUri完全为0，这将告诉senml_cbor_serialize使用完整URI
-    // 而不是相对URI
+    // 直接调用一次 senml_cbor_serialize() 来编码所有数据
+    // 这样框架会自动生成正确的CBOR数组，每个记录都有完整的URI
+    int encodeResult = senml_cbor_serialize(NULL, dataSize, dataArray, payload_out);
     
-    COMPOSITE_TRACE("Using root URI as base for SenML CBOR encoding (no object/instance/resource set)");
-    
-    // 使用框架的SenML CBOR编码函数
-    // senml_cbor_serialize() 签名：
-    // int senml_cbor_serialize(const lwm2m_uri_t *uriP, int size, 
-    //                          const lwm2m_data_t *tlvP, uint8_t **bufferP)
-    
-    COMPOSITE_TRACE("Encoding %d data items to SenML CBOR format", totalDataCount);
-    int encodeResult = senml_cbor_serialize(&baseUri, totalDataCount, dataArray, payload_out);
-    
-    if (encodeResult < 0)
+    if (encodeResult <= 0)
     {
-        COMPOSITE_ERROR("Failed to encode data to SenML CBOR format, result=%d", encodeResult);
-        lwm2m_free(dataArray);
+        COMPOSITE_ERROR("Failed to encode composite data: result=%d", encodeResult);
+        lwm2m_data_free(dataSize, dataArray);
         return COAP_500_INTERNAL_SERVER_ERROR;
     }
     
-    *payload_len_out = (size_t)encodeResult;
+    *payload_len_out = encodeResult;
     
-    COMPOSITE_TRACE("Successfully encoded %zu bytes of SenML CBOR payload", *payload_len_out);
-    COMPOSITE_TRACE("Payload header bytes: 0x%02x 0x%02x 0x%02x ...", 
-                   *payload_out[0], *payload_len_out > 1 ? (*payload_out)[1] : 0,
-                   *payload_len_out > 2 ? (*payload_out)[2] : 0);
+    COMPOSITE_TRACE("Successfully encoded %zu bytes", *payload_len_out);
     
-    // 清理数据数组（payload由senml_cbor_serialize分配，由调用者负责释放）
-    lwm2m_free(dataArray);
+    // 清理数据数组
+    lwm2m_data_free(dataSize, dataArray);
     
     COMPOSITE_TRACE("=== ENCODE MULTI RESOURCE DONE === payload_len=%zu", *payload_len_out);
     return COAP_205_CONTENT;
@@ -1244,7 +1187,7 @@ uint8_t composite_write(lwm2m_context_t *contextP,
     // - 如果部分资源成功 -> 2.04 Changed（部分成功的写入）
     // - 如果没有资源成功 -> 返回第一个错误码（通常是 4.04 Not Found）
     
-    liblwm2m_log("Composite write results: %d successful, %d failed", successCount, failureCount);
+    COMPOSITE_TRACE("Composite write results: %d successful, %d failed", successCount, failureCount);
     
     if (successCount > 0)
     {
@@ -1259,7 +1202,7 @@ uint8_t composite_write(lwm2m_context_t *contextP,
     else
     {
         // 没有处理任何资源
-        liblwm2m_log("No resources were processed");
+        COMPOSITE_ERROR("No resources were processed");
         return COAP_400_BAD_REQUEST;
     }
 }
