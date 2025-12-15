@@ -1107,9 +1107,29 @@ uint8_t composite_write(lwm2m_context_t *contextP,
                 
                 COMPOSITE_TRACE("    Instance %u with %zu resources", instanceUri.instanceId, 
                               instanceArray[j].value.asChildren.count);
+            #if 0
+                // 调试：打印资源列表
+                if (instanceArray[j].type == LWM2M_TYPE_OBJECT_INSTANCE && 
+                    instanceArray[j].value.asChildren.count > 0)
+                {
+                    for (size_t k = 0; k < instanceArray[j].value.asChildren.count; k++)
+                    {
+                        lwm2m_data_t *resItem = &instanceArray[j].value.asChildren.array[k];
+                        COMPOSITE_TRACE("      Resource %u (type=%d)", resItem->id, resItem->type);
+                    }
+                }
+                else
+                {
+                    COMPOSITE_ERROR("      Instance %u has unexpected type=%d (expected %d for OBJECT_INSTANCE)",
+                                  instanceArray[j].id, instanceArray[j].type, LWM2M_TYPE_OBJECT_INSTANCE);
+                }
+            #endif
                 
                 // 使用 object_writeInstance() 来写入实例的所有资源
                 // object_writeInstance() 期望 dataP 指向实例数据
+                COMPOSITE_TRACE("      Calling object_writeInstance with instanceUri={objectId=%u, instanceId=%u}, instanceArray[j]={id=%u, type=%d, count=%zu}",
+                              instanceUri.objectId, instanceUri.instanceId,
+                              instanceArray[j].id, instanceArray[j].type, instanceArray[j].value.asChildren.count);
                 uint8_t writeResult = object_writeInstance(contextP, &instanceUri, &instanceArray[j]);
                 
                 if (writeResult == COAP_204_CHANGED)
@@ -1146,6 +1166,17 @@ uint8_t composite_write(lwm2m_context_t *contextP,
                 instanceUri.objectId = dataP[i].value.asChildren.array[0].id;
                 instanceUri.instanceId = dataP[i].id;
                 
+                COMPOSITE_TRACE("      Inferred objectId=%u from first resource id", instanceUri.objectId);
+                
+            #if 0
+                // 调试：打印资源列表
+                for (size_t k = 0; k < dataP[i].value.asChildren.count; k++)
+                {
+                    lwm2m_data_t *resItem = &dataP[i].value.asChildren.array[k];
+                    COMPOSITE_TRACE("      Resource %u (type=%d)", resItem->id, resItem->type);
+                }
+            #endif
+                
                 uint8_t writeResult = object_writeInstance(contextP, &instanceUri, &dataP[i]);
                 
                 if (writeResult == COAP_204_CHANGED)
@@ -1165,6 +1196,11 @@ uint8_t composite_write(lwm2m_context_t *contextP,
                     }
                 }
             }
+        }
+        else
+        {
+            COMPOSITE_ERROR("Unexpected data type at index %d: type=%d (expected OBJECT or OBJECT_INSTANCE)",
+                          i, dataP[i].type);
         }
     }
 
