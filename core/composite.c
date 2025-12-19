@@ -1245,19 +1245,222 @@ uint8_t composite_write(lwm2m_context_t *contextP,
 
 // ======================== Composite Observe ========================
 
-// 复合观察的上下文管理
-typedef struct
+// ======================== 复合观察数据结构 ========================
+
+/**
+ * 前向声明
+ */
+typedef struct prv_composite_observed_ prv_composite_observed_t;
+
+/**
+ * 复合观察的观察者（对应于 observe.c 中的 lwm2m_watcher_t）
+ * 每个复合观察对应一个观察者，保存该观察的所有状态
+ */
+typedef struct prv_composite_watcher_
 {
-    lwm2m_server_t *serverP;
-    lwm2m_uri_t *uriList;
-    int uriCount;
+    struct prv_composite_watcher_ *next;
+    
+    // Token 用于识别这个观察
     uint8_t token[8];
     int token_len;
-} prv_composite_observe_ctx_t;
+    
+    // 对应的服务器
+    lwm2m_server_t *server;
+    
+    // 所有被观察的 URI 列表
+    lwm2m_uri_t *uriList;
+    int uriCount;
+    
+    // 观察参数
+    lwm2m_attributes_t *parameters;
+    
+    // 观察状态
+    bool active;           // 是否活跃
+    time_t lastTime;       // 上次发送通知的时间
+    uint16_t lastMid;      // 上次 MID
+    uint32_t counter;      // 观察计数器（递增）
+    
+    // 用于检测变化（缓存上一次的值）
+    lwm2m_data_t *lastDataArray;
+    int lastDataSize;
+    
+} prv_composite_watcher_t;
 
-// 复合观察的上下文暂存表
-static prv_composite_observe_ctx_t g_composite_observe[4];
-static int g_composite_observe_count = 0;
+/**
+ * 复合观察对象（类似于 observe.c 中的 lwm2m_observed_t）
+ * 表示某个资源被观察，可能有多个观察者（watcher）
+ */
+typedef struct prv_composite_observed_
+{
+    // 被观察的 URI 列表（主键）
+    lwm2m_uri_t *uriList;
+    int uriCount;
+    
+    // 观察者列表
+    prv_composite_watcher_t *watcherList;
+    
+    // 用于链表
+    struct prv_composite_observed_ *next;
+} prv_composite_observed_t;
+
+// 全局复合观察列表
+static prv_composite_observed_t *g_composite_observedList = NULL;
+
+// ======================== 辅助函数 ========================
+
+/**
+ * 比较两个 URI 列表是否相等
+ */
+static bool prv_compareUriLists(lwm2m_uri_t *list1, int count1, 
+                                lwm2m_uri_t *list2, int count2)
+{
+    if (count1 != count2) return false;
+    
+    for (int i = 0; i < count1; i++)
+    {
+        if (list1[i].objectId != list2[i].objectId ||
+            list1[i].instanceId != list2[i].instanceId ||
+            list1[i].resourceId != list2[i].resourceId)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * 查找已观察的对象
+ */
+static prv_composite_observed_t* prv_findObserved(lwm2m_uri_t *uriList, int uriCount)
+{
+    prv_composite_observed_t *targetP = g_composite_observedList;
+    
+    while (targetP != NULL)
+    {
+        if (prv_compareUriLists(targetP->uriList, targetP->uriCount, uriList, uriCount))
+        {
+            return targetP;
+        }
+        targetP = targetP->next;
+    }
+    
+    return NULL;
+}
+
+/**
+ * 从链表中移除已观察对象
+ */
+static void prv_unlinkObserved(prv_composite_observed_t *observedP)
+{
+    if (g_composite_observedList == observedP)
+    {
+        g_composite_observedList = g_composite_observedList->next;
+    }
+    else
+    {
+        prv_composite_observed_t *parentP = g_composite_observedList;
+        
+        while (parentP->next != NULL && parentP->next != observedP)
+        {
+            parentP = parentP->next;
+        }
+        
+        if (parentP->next != NULL)
+        {
+            parentP->next = parentP->next->next;
+        }
+    }
+}
+
+/**
+ * 查找观察者
+ */
+static prv_composite_watcher_t* prv_findWatcher(prv_composite_observed_t *observedP,
+                                                lwm2m_server_t *server)
+{
+    prv_composite_watcher_t *targetP = observedP->watcherList;
+    
+    while (targetP != NULL && targetP->server != server)
+    {
+        targetP = targetP->next;
+    }
+    
+    return targetP;
+}
+
+/**
+ * 获取或创建观察者
+ */
+static prv_composite_watcher_t* prv_getWatcher(lwm2m_uri_t *uriList, int uriCount,
+                                               lwm2m_server_t *server)
+{
+    prv_composite_observed_t *observedP;
+    prv_composite_watcher_t *watcherP;
+    bool allocatedObserver = false;
+    
+    observedP = prv_findObserved(uriList, uriCount);
+    if (observedP == NULL)
+    {
+        // 创建新的观察对象
+        observedP = (prv_composite_observed_t *)lwm2m_malloc(sizeof(prv_composite_observed_t));
+        if (observedP == NULL)
+        {
+            COMPOSITE_ERROR("Failed to allocate observed object");
+            return NULL;
+        }
+        
+        memset(observedP, 0, sizeof(prv_composite_observed_t));
+        
+        // 复制 URI 列表
+        observedP->uriList = (lwm2m_uri_t *)lwm2m_malloc(sizeof(lwm2m_uri_t) * uriCount);
+        if (observedP->uriList == NULL)
+        {
+            lwm2m_free(observedP);
+            COMPOSITE_ERROR("Failed to allocate URI list");
+            return NULL;
+        }
+        
+        memcpy(observedP->uriList, uriList, sizeof(lwm2m_uri_t) * uriCount);
+        observedP->uriCount = uriCount;
+        
+        // 加入全局列表
+        observedP->next = g_composite_observedList;
+        g_composite_observedList = observedP;
+        
+        allocatedObserver = true;
+        COMPOSITE_TRACE("Created new composite observed object with %d URIs", uriCount);
+    }
+    
+    // 查找或创建观察者
+    watcherP = prv_findWatcher(observedP, server);
+    if (watcherP == NULL)
+    {
+        watcherP = (prv_composite_watcher_t *)lwm2m_malloc(sizeof(prv_composite_watcher_t));
+        if (watcherP == NULL)
+        {
+            if (allocatedObserver)
+            {
+                lwm2m_free(observedP->uriList);
+                lwm2m_free(observedP);
+            }
+            COMPOSITE_ERROR("Failed to allocate watcher");
+            return NULL;
+        }
+        
+        memset(watcherP, 0, sizeof(prv_composite_watcher_t));
+        watcherP->active = false;
+        watcherP->server = server;
+        watcherP->counter = 0;
+        
+        // 加入观察者列表
+        watcherP->next = observedP->watcherList;
+        observedP->watcherList = watcherP;
+        
+        COMPOSITE_TRACE("Created new watcher for server %p", (void*)server);
+    }
+    
+    return watcherP;
+}
 
 // 注册复合观察
 uint8_t composite_observe(lwm2m_context_t *contextP,
@@ -1267,110 +1470,106 @@ uint8_t composite_observe(lwm2m_context_t *contextP,
                           coap_packet_t *response)
 {
     COMPOSITE_TRACE("=== COMPOSITE OBSERVE START ===");
-    COMPOSITE_TRACE("contextP=%p, uriP=%p, serverP=%p", (void*)contextP, (void*)uriP, (void*)serverP);
-    COMPOSITE_TRACE("message->token_len=%d, message->code=%d", 
-                    message->token_len, message->code);
+    COMPOSITE_TRACE("contextP=%p, serverP=%p", (void*)contextP, (void*)serverP);
     
     lwm2m_uri_t *uris = NULL;
     int uriCount = 0;
-
-    // 检查必要的参数
+    prv_composite_watcher_t *watcherP = NULL;
+    uint8_t result = COAP_205_CONTENT;
+    
+    // 参数检查
     if (contextP == NULL || serverP == NULL || message == NULL || response == NULL)
     {
-        COMPOSITE_ERROR("Invalid parameters: contextP=%p, serverP=%p, message=%p, response=%p",
-                       (void*)contextP, (void*)serverP, (void*)message, (void*)response);
-        return COAP_400_BAD_REQUEST;
-    }
-
-    // 验证消息是否包含有效的token
-    if (message->token_len == 0 || message->token_len > 8)
-    {
-        COMPOSITE_ERROR("Invalid token length: %d (must be 1-8)", message->token_len);
+        COMPOSITE_ERROR("Invalid parameters");
         return COAP_400_BAD_REQUEST;
     }
     
-    COMPOSITE_TRACE("Valid token, length=%d", message->token_len);
-
-    // 检查是否有payload
+    if (message->token_len == 0 || message->token_len > 8)
+    {
+        COMPOSITE_ERROR("Invalid token length: %d", message->token_len);
+        return COAP_400_BAD_REQUEST;
+    }
+    
     if (message->payload == NULL || message->payload_len == 0)
     {
         COMPOSITE_ERROR("Invalid payload: NULL or empty");
         return COAP_400_BAD_REQUEST;
     }
-
-    // 解析请求中的URI列表
-    COMPOSITE_TRACE("Decoding URI list from observe request");
+    
+    // 解析 URI 列表
+    COMPOSITE_TRACE("Decoding URI list from payload");
     if (prv_decode_uri_list(message->payload, message->payload_len, &uris, &uriCount) != 0)
     {
-        COMPOSITE_ERROR("Failed to decode URI list from payload (len=%zu)", message->payload_len);
-        return COAP_400_BAD_REQUEST;
-    }
-
-    // 如果没有URI，返回错误
-    if (uriCount == 0 || uris == NULL)
-    {
-        COMPOSITE_ERROR("No URIs decoded or uriCount=0");
+        COMPOSITE_ERROR("Failed to decode URI list");
         return COAP_400_BAD_REQUEST;
     }
     
-    COMPOSITE_TRACE("Successfully decoded %d URIs for observation", uriCount);
-
-    // 检查是否有可用的上下文槽位
-    if (g_composite_observe_count >= 4)
+    if (uriCount == 0 || uris == NULL)
     {
-        COMPOSITE_ERROR("No available context slots (max 4 concurrent observations)");
+        COMPOSITE_ERROR("No URIs decoded");
+        return COAP_400_BAD_REQUEST;
+    }
+    
+    COMPOSITE_TRACE("Decoded %d URIs for observation", uriCount);
+    
+    // 获取或创建观察者
+    watcherP = prv_getWatcher(uris, uriCount, serverP);
+    if (watcherP == NULL)
+    {
+        COMPOSITE_ERROR("Failed to get watcher");
         lwm2m_free(uris);
         return COAP_500_INTERNAL_SERVER_ERROR;
     }
-
-    // 保存观察上下文
-    COMPOSITE_TRACE("Creating observe context #%d", g_composite_observe_count);
-    prv_composite_observe_ctx_t *ctx = &g_composite_observe[g_composite_observe_count];
-    memset(ctx, 0, sizeof(*ctx));
-
-    ctx->serverP = serverP;
-    ctx->uriList = uris;
-    ctx->uriCount = uriCount;
-    ctx->token_len = message->token_len;
-    memcpy(ctx->token, message->token, message->token_len);
-
-    COMPOSITE_TRACE("Context #%d: serverP=%p, uriCount=%d, token_len=%d",
-                   g_composite_observe_count, (void*)serverP, uriCount, message->token_len);
-
-    // 读取所有URI的数据，准备聚合响应
-    // prv_encode_multi_resource 会自己读取每个URI的数据并编码为SenML CBOR
+    
+    // 保存观察参数
+    watcherP->token_len = message->token_len;
+    memcpy(watcherP->token, message->token, message->token_len);
+    watcherP->active = true;
+    watcherP->lastTime = lwm2m_gettime();
+    watcherP->lastMid = response->mid;
+    watcherP->counter = 0;
+    
+    COMPOSITE_TRACE("Watcher registered: token_len=%d, active=true", watcherP->token_len);
+    
+    // 读取初始数据并编码响应
     uint8_t *payload = NULL;
     size_t payloadLen = 0;
     
-    int encodeRes = prv_encode_multi_resource(uris, uriCount, contextP, &payload, &payloadLen);
+    result = prv_encode_multi_resource(uris, uriCount, contextP, &payload, &payloadLen);
     
-    if (encodeRes != COAP_205_CONTENT || payload == NULL || payloadLen == 0)
+    if (result != COAP_205_CONTENT || payload == NULL || payloadLen == 0)
     {
-        COMPOSITE_ERROR("Failed to encode multi-resource data, result=%d", encodeRes);
+        COMPOSITE_ERROR("Failed to encode initial data: result=%d", result);
         lwm2m_free(payload);
         lwm2m_free(uris);
         return COAP_500_INTERNAL_SERVER_ERROR;
     }
-
-    COMPOSITE_TRACE("Encoded resources to SenML CBOR, payload_len=%zu", payloadLen);
-
-    // 设置响应体和头
-    if (response != NULL)
-    {
-        coap_set_header_content_type(response, LWM2M_CONTENT_SENML_CBOR);
-        coap_set_payload(response, payload, payloadLen);
-    }
-
-    // 保存观察上下文（在设置响应后）
-    g_composite_observe_count++;
     
-    COMPOSITE_TRACE("Context saved: uriCount=%d", uriCount);
-
-    // 设置 Observe 响应头（初始值为 0）
-    coap_set_header_observe(response, 0);
-
-    COMPOSITE_TRACE("=== COMPOSITE OBSERVE DONE === context_count=%d, payload_len=%zu", 
-                   g_composite_observe_count, payloadLen);
+    COMPOSITE_TRACE("Initial data encoded: %zu bytes", payloadLen);
+    
+    // 缓存初始数据用于变化检测
+    int dataSize = 0;
+    lwm2m_data_t *dataP = NULL;
+    
+    if (object_readCompositeData(contextP, uris, uriCount, &dataSize, &dataP) == COAP_205_CONTENT)
+    {
+        if (watcherP->lastDataArray != NULL)
+        {
+            lwm2m_data_free(watcherP->lastDataSize, watcherP->lastDataArray);
+        }
+        watcherP->lastDataArray = dataP;
+        watcherP->lastDataSize = dataSize;
+    }
+    
+    // 设置响应
+    coap_set_header_content_type(response, LWM2M_CONTENT_SENML_CBOR);
+    coap_set_payload(response, payload, payloadLen);
+    coap_set_header_observe(response, watcherP->counter);
+    
+    COMPOSITE_TRACE("=== COMPOSITE OBSERVE DONE === response_observe=%u", watcherP->counter);
+    
+    // 注意：不释放 uris，因为它被保存在 observed 对象中
+    // 不释放 payload，因为它由 CoAP 层管理
     
     return COAP_205_CONTENT;
 }
@@ -1384,8 +1583,12 @@ uint8_t composite_cancel_observe(lwm2m_context_t *contextP,
                                  coap_packet_t *response)
 {
     COMPOSITE_TRACE("=== COMPOSITE CANCEL OBSERVE START ===");
-    COMPOSITE_TRACE("contextP=%p, uriP=%p, serverP=%p", (void*)contextP, (void*)uriP, (void*)serverP);
-    COMPOSITE_TRACE("message->mid=%d, current_contexts=%d", message->mid, g_composite_observe_count);
+    COMPOSITE_TRACE("contextP=%p, serverP=%p", (void*)contextP, (void*)serverP);
+    
+    lwm2m_uri_t *uris = NULL;
+    int uriCount = 0;
+    uint8_t result = COAP_205_CONTENT;
+    int canceledCount = 0;
     
     (void)uriP;  // 未使用
     
@@ -1394,261 +1597,446 @@ uint8_t composite_cancel_observe(lwm2m_context_t *contextP,
         COMPOSITE_ERROR("Invalid parameters");
         return COAP_400_BAD_REQUEST;
     }
-
-    lwm2m_uri_t *uris = NULL;
-    int uriCount = 0;
-    uint8_t result = COAP_205_CONTENT;
-    int canceledCount = 0;
-
-    // 检查是否有payload（可选）
-    // 如果有payload，则取消特定的复合观察
-    // 如果没有payload，则取消该服务器的所有复合观察
+    
+    // 如果有 payload，取消特定的观察；否则取消该服务器的所有观察
     if (message->payload != NULL && message->payload_len > 0)
     {
-        // 解析请求中的URI列表
-        COMPOSITE_TRACE("Decoding URI list from cancel request");
+        COMPOSITE_TRACE("Payload present: %zu bytes", message->payload_len);
+        
         if (prv_decode_uri_list(message->payload, message->payload_len, &uris, &uriCount) != 0)
         {
             COMPOSITE_ERROR("Failed to decode URI list");
             return COAP_400_BAD_REQUEST;
         }
-
-        // 如果没有URI，返回错误
+        
         if (uriCount == 0 || uris == NULL)
         {
-            COMPOSITE_ERROR("No URIs decoded or uriCount=0");
+            COMPOSITE_ERROR("No URIs decoded");
             return COAP_400_BAD_REQUEST;
         }
         
         COMPOSITE_TRACE("Decoded %d URIs for targeted cancellation", uriCount);
-
-        // 取消这些特定URI的观察
-        for (int i = 0; i < uriCount; i++)
+        
+        // 查找并取消这些 URI 的观察
+        prv_composite_observed_t *observedP = prv_findObserved(uris, uriCount);
+        if (observedP != NULL)
         {
-            COMPOSITE_TRACE("Cancelling observe for URI #%d: /%u/%u/%u", i,
-                           uris[i].objectId, uris[i].instanceId, uris[i].resourceId);
-            
-            // 使用 observe_cancel 取消该URI的观察
-            observe_cancel(contextP, message->mid, serverP->sessionH);
-            canceledCount++;
+            prv_composite_watcher_t *watcherP = prv_findWatcher(observedP, serverP);
+            if (watcherP != NULL)
+            {
+                COMPOSITE_TRACE("Found watcher for targeted cancellation");
+                
+                // 释放缓存的数据
+                if (watcherP->lastDataArray != NULL)
+                {
+                    lwm2m_data_free(watcherP->lastDataSize, watcherP->lastDataArray);
+                    watcherP->lastDataArray = NULL;
+                }
+                
+                // 从观察者列表中移除
+                if (observedP->watcherList == watcherP)
+                {
+                    observedP->watcherList = watcherP->next;
+                }
+                else
+                {
+                    prv_composite_watcher_t *parentP = observedP->watcherList;
+                    while (parentP->next != NULL && parentP->next != watcherP)
+                    {
+                        parentP = parentP->next;
+                    }
+                    if (parentP->next != NULL)
+                    {
+                        parentP->next = parentP->next->next;
+                    }
+                }
+                
+                lwm2m_free(watcherP);
+                canceledCount++;
+                
+                COMPOSITE_TRACE("Watcher removed, checking if observed object is empty");
+                
+                // 如果观察者列表为空，移除整个观察对象
+                if (observedP->watcherList == NULL)
+                {
+                    COMPOSITE_TRACE("No more watchers, removing observed object");
+                    prv_unlinkObserved(observedP);
+                    lwm2m_free(observedP->uriList);
+                    lwm2m_free(observedP);
+                }
+            }
         }
-
+        
         lwm2m_free(uris);
     }
     else
     {
-        // 没有payload，取消该服务器的所有复合观察
-        COMPOSITE_TRACE("No URI list provided, cancelling all observations for this server");
-    }
-
-    // 从全局上下文中移除已取消的观察
-    int removed_count = 0;
-    int i = 0;
-    while (i < g_composite_observe_count)
-    {
-        if (g_composite_observe[i].serverP == serverP)
+        // 没有 payload：取消该服务器的所有观察
+        COMPOSITE_TRACE("No payload: cancelling all observations for server %p", (void*)serverP);
+        
+        prv_composite_observed_t *observedP = g_composite_observedList;
+        while (observedP != NULL)
         {
-            COMPOSITE_TRACE("Removing composite observe context #%d", i);
+            prv_composite_observed_t *nextObserved = observedP->next;
+            prv_composite_watcher_t *watcherP = observedP->watcherList;
             
-            // 取消该上下文中所有URI的观察
-            if (g_composite_observe[i].uriCount > 0)
+            while (watcherP != NULL)
             {
-                for (int j = 0; j < g_composite_observe[i].uriCount; j++)
+                prv_composite_watcher_t *nextWatcher = watcherP->next;
+                
+                if (watcherP->server == serverP)
                 {
-                    COMPOSITE_TRACE("  Cancelling observe for URI: /%u/%u/%u",
-                                   g_composite_observe[i].uriList[j].objectId,
-                                   g_composite_observe[i].uriList[j].instanceId,
-                                   g_composite_observe[i].uriList[j].resourceId);
+                    COMPOSITE_TRACE("Removing watcher for observed object");
                     
-                    observe_cancel(contextP, message->mid, serverP->sessionH);
+                    // 释放缓存的数据
+                    if (watcherP->lastDataArray != NULL)
+                    {
+                        lwm2m_data_free(watcherP->lastDataSize, watcherP->lastDataArray);
+                        watcherP->lastDataArray = NULL;
+                    }
+                    
+                    // 从列表中移除
+                    if (observedP->watcherList == watcherP)
+                    {
+                        observedP->watcherList = watcherP->next;
+                    }
+                    else
+                    {
+                        prv_composite_watcher_t *parentW = observedP->watcherList;
+                        while (parentW->next != NULL && parentW->next != watcherP)
+                        {
+                            parentW = parentW->next;
+                        }
+                        if (parentW->next != NULL)
+                        {
+                            parentW->next = parentW->next->next;
+                        }
+                    }
+                    
+                    lwm2m_free(watcherP);
+                    canceledCount++;
                 }
+                
+                watcherP = nextWatcher;
             }
-
-            // 释放该上下文的资源
-            if (g_composite_observe[i].uriList != NULL)
-            {
-                lwm2m_free(g_composite_observe[i].uriList);
-                g_composite_observe[i].uriList = NULL;
-            }
-            memset(&g_composite_observe[i], 0, sizeof(g_composite_observe[i]));
             
-            // 将最后一个上下文移到当前位置
-            if (i < g_composite_observe_count - 1)
+            // 如果观察对象没有观察者了，移除它
+            if (observedP->watcherList == NULL)
             {
-                memcpy(&g_composite_observe[i], 
-                       &g_composite_observe[g_composite_observe_count - 1],
-                       sizeof(g_composite_observe[i]));
+                COMPOSITE_TRACE("Removing empty observed object");
+                prv_unlinkObserved(observedP);
+                lwm2m_free(observedP->uriList);
+                lwm2m_free(observedP);
             }
-            g_composite_observe_count--;
-            removed_count++;
             
-            // 不递增 i，因为我们需要检查新移动到这个位置的上下文
-        }
-        else
-        {
-            i++;
+            observedP = nextObserved;
         }
     }
-
-    COMPOSITE_TRACE("Removed %d observe contexts for this server", removed_count);
     
-    // 取消观察响应返回 2.05 Content，但体为空的 SenML CBOR
-    // 返回一个空的 SenML CBOR 数组：0x80 (empty array)
+    COMPOSITE_TRACE("Cancelled %d observations", canceledCount);
+    
+    // 返回空的 SenML CBOR 数组作为响应
     if (response != NULL)
     {
-        // 在堆上分配空的 SenML CBOR 数组
-        uint8_t *empty_senml_cbor = (uint8_t *)lwm2m_malloc(1);
-        if (empty_senml_cbor != NULL)
+        uint8_t *emptyArray = (uint8_t *)lwm2m_malloc(1);
+        if (emptyArray != NULL)
         {
-            empty_senml_cbor[0] = 0x80;  // CBOR empty array
+            emptyArray[0] = 0x80;  // CBOR empty array
             coap_set_header_content_type(response, LWM2M_CONTENT_SENML_CBOR);
-            coap_set_payload(response, empty_senml_cbor, 1);
-            // 注意：payload 由 CoAP 层管理，会在响应发送后自动释放
+            coap_set_payload(response, emptyArray, 1);
         }
     }
-
-    COMPOSITE_TRACE("=== COMPOSITE CANCEL OBSERVE DONE === result=%d, total_contexts=%d", 
-                   result, g_composite_observe_count);
+    
+    COMPOSITE_TRACE("=== COMPOSITE CANCEL OBSERVE DONE === cancelled=%d", canceledCount);
     return result;
 }
 
-// ======================== 聚合通知函数 ========================
+// ======================== 定期检查和通知机制 ========================
 
 /**
- * 通过 CoAP 发送复合观察的聚合通知
- * 参数：
- *   - contextP: LWM2M 上下文
- *   - ctx: 复合观察上下文
- *   - observeCounter: Observe 计数器，用于防止重复通知
+ * 检查数据是否发生了变化
  */
-static void prv_send_composite_notification(lwm2m_context_t *contextP,
-                                           prv_composite_observe_ctx_t *ctx,
-                                           uint32_t observeCounter)
+static bool prv_hasDataChanged(lwm2m_data_t *oldData, int oldSize,
+                               lwm2m_data_t *newData, int newSize)
 {
-    COMPOSITE_TRACE("=== SEND COMPOSITE NOTIFICATION START ===");
-    COMPOSITE_TRACE("ctx=%p, uriCount=%d, token_len=%d", (void*)ctx, ctx->uriCount, ctx->token_len);
+    if (oldSize != newSize) return true;
     
-    uint8_t *payload = NULL;
-    size_t payload_len = 0;
-
-    // 编码所有资源的当前值为 SenML CBOR 格式
-    COMPOSITE_TRACE("Encoding %d resources for notification", ctx->uriCount);
-    int encodeResult = prv_encode_multi_resource(ctx->uriList, ctx->uriCount, 
-                                                  contextP, &payload, &payload_len);
-    
-    if (encodeResult != COAP_205_CONTENT || payload == NULL)
+    // 简化的变化检测：比较数据大小或内容
+    // 更完善的实现应该比较每个资源的值
+    for (int i = 0; i < oldSize; i++)
     {
-        COMPOSITE_ERROR("Failed to encode payload: result=%d", encodeResult);
-        if (payload != NULL)
+        if (oldData[i].id != newData[i].id ||
+            oldData[i].type != newData[i].type)
         {
-            lwm2m_free(payload);
+            return true;
         }
+        
+        // 比较值（根据类型）
+        switch (oldData[i].type)
+        {
+        case LWM2M_TYPE_INTEGER:
+        {
+            int64_t oldVal, newVal;
+            if (lwm2m_data_decode_int(&oldData[i], &oldVal) &&
+                lwm2m_data_decode_int(&newData[i], &newVal) &&
+                oldVal != newVal)
+            {
+                return true;
+            }
+            break;
+        }
+        case LWM2M_TYPE_UNSIGNED_INTEGER:
+        {
+            uint64_t oldVal, newVal;
+            if (lwm2m_data_decode_uint(&oldData[i], &oldVal) &&
+                lwm2m_data_decode_uint(&newData[i], &newVal) &&
+                oldVal != newVal)
+            {
+                return true;
+            }
+            break;
+        }
+        case LWM2M_TYPE_FLOAT:
+        {
+            double oldVal, newVal;
+            if (lwm2m_data_decode_float(&oldData[i], &oldVal) &&
+                lwm2m_data_decode_float(&newData[i], &newVal))
+            {
+                // 使用epsilon比较浮点数，避免直接使用==或!=
+                double epsilon = 1e-9;
+                double diff = (oldVal > newVal) ? (oldVal - newVal) : (newVal - oldVal);
+                if (diff > epsilon)
+                {
+                    return true;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    
+    return false;
+}
+
+/**
+ * 发送复合观察通知
+ */
+static void prv_sendCompositeNotification(lwm2m_context_t *contextP,
+                                         prv_composite_watcher_t *watcherP,
+                                         uint8_t *payload, size_t payloadLen)
+{
+    if (watcherP == NULL || watcherP->server == NULL)
+    {
+        COMPOSITE_ERROR("Invalid watcher or server");
         return;
     }
-
-    COMPOSITE_TRACE("Payload encoded successfully, length=%zu", payload_len);
-
-    // 构造 CoAP 通知消息
+    
+    COMPOSITE_TRACE("Sending notification: token_len=%d, counter=%u, payload_len=%zu",
+                   watcherP->token_len, watcherP->counter, payloadLen);
+    
     coap_packet_t message[1];
     memset(message, 0, sizeof(coap_packet_t));
-
-    // 设置为 CoAP CHANGED 响应
-    message->code = COAP_205_CONTENT;
-    message->type = COAP_TYPE_NON;  // 非确认消息（通知）
     
-    // 设置 Token（来自客户端的原始请求）
-    message->token_len = ctx->token_len;
-    if (ctx->token_len > 0)
+    // 构造通知消息
+    message->code = COAP_205_CONTENT;
+    message->type = COAP_TYPE_NON;  // 非确认消息
+    message->mid = contextP->nextMID++;
+    
+    // 设置 Token
+    message->token_len = watcherP->token_len;
+    if (watcherP->token_len > 0)
     {
-        memcpy(message->token, ctx->token, ctx->token_len);
+        memcpy(message->token, watcherP->token, watcherP->token_len);
     }
-
-    // 设置内容类型为 SenML CBOR
+    
+    // 设置内容类型和 Observe 选项
     coap_set_header_content_type(message, LWM2M_CONTENT_SENML_CBOR);
-
-    // 设置 Observe 计数器（用于去重）
-    coap_set_header_observe(message, observeCounter);
-
-    // 设置负载
-    coap_set_payload(message, payload, payload_len);
-
-    COMPOSITE_TRACE("Sending notification: code=%d, content_type=%d, payload_len=%zu, token_len=%d",
-                   message->code, LWM2M_CONTENT_SENML_CBOR, payload_len, message->token_len);
-
-    // 通过服务器会话发送通知
-    uint8_t sendResult = message_send(contextP, message, ctx->serverP->sessionH);
+    coap_set_header_observe(message, watcherP->counter++);
+    coap_set_payload(message, payload, payloadLen);
+    
+    // 发送通知
+    uint8_t sendResult = message_send(contextP, message, watcherP->server->sessionH);
+    
     if (sendResult == COAP_NO_ERROR)
     {
-        COMPOSITE_TRACE("Notification sent successfully");
+        watcherP->lastTime = lwm2m_gettime();
+        watcherP->lastMid = message->mid;
+        COMPOSITE_TRACE("Notification sent successfully, counter incremented to %u", watcherP->counter);
     }
     else
     {
         COMPOSITE_ERROR("Failed to send notification: result=%d", sendResult);
     }
-
-    // 清理负载
-    if (payload != NULL)
-    {
-        lwm2m_free(payload);
-    }
-
-    COMPOSITE_TRACE("=== SEND COMPOSITE NOTIFICATION DONE ===");
 }
 
 /**
- * 发送复合观察的聚合通知
- * 该函数应该被定期调用（通过 observe_step 机制），以检查是否有任何被观察的资源发生了变化
- * 
- * 参数：
- *   - contextP: LWM2M 上下文
- *   - currentTime: 当前时间
+ * 定期检查复合观察并发送通知（应该由主事件循环定期调用）
  */
-void composite_notify(lwm2m_context_t *contextP, time_t currentTime)
+void composite_step(lwm2m_context_t *contextP, time_t currentTime, time_t *timeoutP)
 {
-    COMPOSITE_TRACE("=== COMPOSITE NOTIFY START === currentTime=%lld", (long long)currentTime);
+    if (contextP == NULL || g_composite_observedList == NULL)
+    {
+        return;
+    }
     
-    // 遍历所有活跃的复合观察上下文
-    for (int i = 0; i < g_composite_observe_count; i++)
+    COMPOSITE_TRACE("=== COMPOSITE STEP START === currentTime=%lld", (long long)currentTime);
+    
+    prv_composite_observed_t *observedP = g_composite_observedList;
+    
+    while (observedP != NULL)
     {
-        prv_composite_observe_ctx_t *ctx = &g_composite_observe[i];
+        prv_composite_watcher_t *watcherP = observedP->watcherList;
         
-        if (ctx->serverP == NULL || ctx->uriList == NULL || ctx->uriCount == 0)
+        while (watcherP != NULL)
         {
-            COMPOSITE_TRACE("Skipping invalid context #%d", i);
-            continue;
+            if (watcherP->active)
+            {
+                bool shouldNotify = false;
+                
+                // 读取当前数据
+                int currentSize = 0;
+                lwm2m_data_t *currentData = NULL;
+                
+                if (object_readCompositeData(contextP, observedP->uriList, observedP->uriCount, 
+                                            &currentSize, &currentData) == COAP_205_CONTENT)
+                {
+                    // 检查数据是否变化
+                    if (watcherP->lastDataArray != NULL && 
+                        prv_hasDataChanged(watcherP->lastDataArray, watcherP->lastDataSize,
+                                         currentData, currentSize))
+                    {
+                        COMPOSITE_TRACE("Data change detected for %d URIs", observedP->uriCount);
+                        shouldNotify = true;
+                        
+                        // 更新缓存的数据
+                        lwm2m_data_free(watcherP->lastDataSize, watcherP->lastDataArray);
+                        watcherP->lastDataArray = currentData;
+                        watcherP->lastDataSize = currentSize;
+                    }
+                    else if (watcherP->lastDataArray == NULL)
+                    {
+                        // 第一次初始化
+                        watcherP->lastDataArray = currentData;
+                        watcherP->lastDataSize = currentSize;
+                    }
+                    else
+                    {
+                        // 数据没有变化，释放临时数据
+                        lwm2m_data_free(currentSize, currentData);
+                    }
+                    
+                    // 检查最大周期
+                    if (!shouldNotify && watcherP->parameters != NULL &&
+                        (watcherP->parameters->toSet & LWM2M_ATTR_FLAG_MAX_PERIOD) != 0)
+                    {
+                        time_t elapsed = currentTime - watcherP->lastTime;
+                        if (elapsed >= watcherP->parameters->maxPeriod)
+                        {
+                            COMPOSITE_TRACE("Maximum period reached for %d URIs", observedP->uriCount);
+                            shouldNotify = true;
+                        }
+                    }
+                    
+                    // 如果应该通知，编码并发送
+                    if (shouldNotify)
+                    {
+                        uint8_t *payload = NULL;
+                        size_t payloadLen = 0;
+                        
+                        int encodeResult = prv_encode_multi_resource(observedP->uriList, 
+                                                                     observedP->uriCount,
+                                                                     contextP, &payload, &payloadLen);
+                        
+                        if (encodeResult == COAP_205_CONTENT && payload != NULL)
+                        {
+                            prv_sendCompositeNotification(contextP, watcherP, payload, payloadLen);
+                            lwm2m_free(payload);
+                        }
+                        else
+                        {
+                            COMPOSITE_ERROR("Failed to encode data for notification");
+                        }
+                    }
+                }
+            }
+            
+            watcherP = watcherP->next;
         }
-
-        COMPOSITE_TRACE("Checking context #%d for notifications", i);
         
-        // 生成 Observe 计数器（递增）
-        // 在实际实现中，这应该与观察资源的变化时间相关
-        static uint32_t observeCounter = 0;
-        observeCounter++;
-
-        // 发送聚合通知
-        prv_send_composite_notification(contextP, ctx, observeCounter);
+        observedP = observedP->next;
     }
-
-    COMPOSITE_TRACE("=== COMPOSITE NOTIFY DONE ===");
+    
+    COMPOSITE_TRACE("=== COMPOSITE STEP DONE ===");
 }
 
 /**
- * 获取复合观察上下文的指针（用于外部访问）
+ * 清理所有复合观察（在关闭时调用）
  */
-prv_composite_observe_ctx_t* composite_get_observe_context(int index)
+void composite_clear(lwm2m_context_t *contextP)
 {
-    if (index < 0 || index >= g_composite_observe_count)
+    (void)contextP;  // 未使用
+    
+    COMPOSITE_TRACE("=== COMPOSITE CLEAR START ===");
+    
+    prv_composite_observed_t *observedP = g_composite_observedList;
+    
+    while (observedP != NULL)
     {
-        return NULL;
+        prv_composite_observed_t *nextObserved = observedP->next;
+        prv_composite_watcher_t *watcherP = observedP->watcherList;
+        
+        while (watcherP != NULL)
+        {
+            prv_composite_watcher_t *nextWatcher = watcherP->next;
+            
+            if (watcherP->lastDataArray != NULL)
+            {
+                lwm2m_data_free(watcherP->lastDataSize, watcherP->lastDataArray);
+            }
+            
+            if (watcherP->parameters != NULL)
+            {
+                lwm2m_free(watcherP->parameters);
+            }
+            
+            lwm2m_free(watcherP);
+            watcherP = nextWatcher;
+        }
+        
+        lwm2m_free(observedP->uriList);
+        lwm2m_free(observedP);
+        observedP = nextObserved;
     }
-    return &g_composite_observe[index];
+    
+    g_composite_observedList = NULL;
+    
+    COMPOSITE_TRACE("=== COMPOSITE CLEAR DONE ===");
 }
 
 /**
- * 获取当前活跃的复合观察数量
+ * 获取当前活跃的复合观察数
  */
 int composite_get_observe_count(void)
 {
-    return g_composite_observe_count;
+    int count = 0;
+    prv_composite_observed_t *observedP = g_composite_observedList;
+    
+    while (observedP != NULL)
+    {
+        prv_composite_watcher_t *watcherP = observedP->watcherList;
+        while (watcherP != NULL)
+        {
+            if (watcherP->active)
+            {
+                count++;
+            }
+            watcherP = watcherP->next;
+        }
+        observedP = observedP->next;
+    }
+    
+    return count;
 }
 

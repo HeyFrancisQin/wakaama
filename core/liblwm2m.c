@@ -480,6 +480,9 @@ next_step:
     }
 
     observe_step(contextP, tv_sec, timeoutP);
+    
+    // RFC 8810: Composite Observe periodic check and notification
+    composite_step(contextP, tv_sec, timeoutP);
 #endif
 
     registration_step(contextP, tv_sec, timeoutP);

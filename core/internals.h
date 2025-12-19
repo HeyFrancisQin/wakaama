@@ -563,8 +563,14 @@ uint8_t composite_cancel_observe(lwm2m_context_t *contextP,
                                  coap_packet_t *message,
                                  coap_packet_t *response);
 
-// 聚合通知函数（主动通知已观察的资源组）
-void composite_notify(lwm2m_context_t *contextP, time_t currentTime);
+// 定期检查复合观察并发送通知（应该由主事件循环定期调用）
+void composite_step(lwm2m_context_t *contextP, time_t currentTime, time_t *timeoutP);
+
+// 清理所有复合观察（在关闭时调用）
+void composite_clear(lwm2m_context_t *contextP);
+
+// 获取当前活跃的复合观察数
+int composite_get_observe_count(void);
 
 #define W_RED     "\033[37;41m"      // 红色文本
 #define END       "\033[0m"
