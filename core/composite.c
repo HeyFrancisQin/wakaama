@@ -1562,6 +1562,16 @@ uint8_t composite_observe(lwm2m_context_t *contextP,
     }
     
     // 设置响应
+    if (NULL == watcherP->parameters)
+    {
+        watcherP->parameters = (lwm2m_attributes_t *)lwm2m_malloc(sizeof(lwm2m_attributes_t));
+        if (watcherP->parameters == NULL) return COAP_500_INTERNAL_SERVER_ERROR;
+        watcherP->parameters->toSet |= LWM2M_ATTR_FLAG_MIN_PERIOD;
+        watcherP->parameters->minPeriod = 10;
+        watcherP->parameters->toSet |= LWM2M_ATTR_FLAG_MAX_PERIOD;
+        watcherP->parameters->maxPeriod = 10;
+    }
+
     coap_set_header_content_type(response, LWM2M_CONTENT_SENML_CBOR);
     coap_set_payload(response, payload, payloadLen);
     coap_set_header_observe(response, watcherP->counter);
