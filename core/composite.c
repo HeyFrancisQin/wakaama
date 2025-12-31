@@ -1569,7 +1569,7 @@ uint8_t composite_observe(lwm2m_context_t *contextP,
         watcherP->parameters->toSet |= LWM2M_ATTR_FLAG_MIN_PERIOD;
         watcherP->parameters->minPeriod = 10;
         watcherP->parameters->toSet |= LWM2M_ATTR_FLAG_MAX_PERIOD;
-        watcherP->parameters->maxPeriod = 10;
+        watcherP->parameters->maxPeriod = 60;
     }
 
     coap_set_header_content_type(response, LWM2M_CONTENT_SENML_CBOR);

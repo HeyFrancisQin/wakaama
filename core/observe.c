@@ -228,7 +228,7 @@ uint8_t observe_handleRequest(lwm2m_context_t * contextP,
             watcherP->parameters->toSet |= LWM2M_ATTR_FLAG_MIN_PERIOD;
             watcherP->parameters->minPeriod = 5;
             watcherP->parameters->toSet |= LWM2M_ATTR_FLAG_MAX_PERIOD;
-            watcherP->parameters->maxPeriod = 5;
+            watcherP->parameters->maxPeriod = 60;
         }
 
         coap_set_header_observe(response, watcherP->counter++);
