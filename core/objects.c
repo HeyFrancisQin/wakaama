@@ -155,14 +155,23 @@ uint8_t object_checkReadable(lwm2m_context_t * contextP,
     {
         if (attrP->toSet & ATTR_FLAG_NUMERIC)
         {
-            switch (valueP->type)
+            // For multiple resources, allow numeric attributes since sub-instances could be numeric
+            if (valueP->type == LWM2M_TYPE_MULTIPLE_RESOURCE)
             {
-                case LWM2M_TYPE_INTEGER:
-                case LWM2M_TYPE_UNSIGNED_INTEGER:
-                case LWM2M_TYPE_FLOAT:
-                    break;
-                default:
-                    result = COAP_405_METHOD_NOT_ALLOWED;
+                // Multiple resource - allow setting numeric attributes
+                // The attributes will be applied to the sub-instances that are numeric
+            }
+            else
+            {
+                switch (valueP->type)
+                {
+                    case LWM2M_TYPE_INTEGER:
+                    case LWM2M_TYPE_UNSIGNED_INTEGER:
+                    case LWM2M_TYPE_FLOAT:
+                        break;
+                    default:
+                        result = COAP_405_METHOD_NOT_ALLOWED;
+                }
             }
         }
     }
