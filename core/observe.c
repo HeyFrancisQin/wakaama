@@ -562,6 +562,14 @@ void observe_step(lwm2m_context_t * contextP,
             }
 #endif
             dataType = valueP->type;
+            
+            // Handle multiple resource type - extract first instance for numeric comparison
+            if (dataType == LWM2M_TYPE_MULTIPLE_RESOURCE && valueP->value.asChildren.count > 0)
+            {
+                valueP = valueP->value.asChildren.array;
+                dataType = valueP->type;
+            }
+            
             switch (dataType)
             {
             case LWM2M_TYPE_INTEGER:
